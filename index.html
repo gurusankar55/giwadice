@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>GIWA Dice - on-chain dice game on GIWA Sepolia</title>
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+<style>
+  :root { --bg:#0f1220; --card:#181c30; --line:#2a2f4a; --text:#eef0ff; --muted:#9aa0c3; --accent:#4f7cff; --win:#2ecc71; --lose:#ff5c7a; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; justify-content:space-between; align-items:center; padding:16px 20px; border-bottom:1px solid var(--line); flex-wrap:wrap; gap:10px; }
+  header h1 { margin:0; font-size:22px; }
+  header h1 span { color:var(--accent); }
+  .wallets { display:flex; gap:8px; flex-wrap:wrap; }
+  button { font:inherit; cursor:pointer; border:none; border-radius:10px; padding:10px 14px; background:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--text); }
+  main { max-width:960px; margin:0 auto; padding:20px; display:grid; grid-template-columns:1.2fr 1fr; gap:20px; }
+  @media (max-width:800px){ main { grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:20px; }
+  .card h2 { margin:0 0 12px; font-size:17px; }
+  .muted { color:var(--muted); font-size:14px; }
+  .dice { width:120px; height:120px; margin:10px auto 18px; border-radius:22px; background:#fff; color:#111; display:flex; align-items:center; justify-content:center; font-size:64px; font-weight:700; box-shadow:0 8px 30px rgba(0,0,0,.4); }
+  .dice.spin { animation:spin .5s linear infinite; }
+  @keyframes spin { from{transform:rotate(0)} to{transform:rotate(360deg)} }
+  .picks { display:grid; grid-template-columns:repeat(6,1fr); gap:8px; margin:12px 0; }
+  .picks button { background:transparent; border:1px solid var(--line); color:var(--text); font-size:20px; padding:12px 0; }
+  .picks button.sel { background:var(--accent); border-color:var(--accent); }
+  .roll { width:100%; font-size:18px; padding:14px; }
+  .result { text-align:center; margin-top:14px; min-height:28px; font-size:18px; font-weight:600; }
+  .result.win { color:var(--win); } .result.lose { color:var(--lose); }
+  .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+  .stat { background:#11152a; border:1px solid var(--line); border-radius:12px; padding:12px; text-align:center; }
+  .stat b { display:block; font-size:22px; }
+  .stat span { color:var(--muted); font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { padding:8px 6px; border-bottom:1px solid var(--line); text-align:left; }
+  th { color:var(--muted); font-weight:500; }
+  .me td { color:var(--accent); font-weight:600; }
+  a { color:var(--accent); }
+  footer { text-align:center; padding:20px; color:var(--muted); font-size:13px; }
+  canvas#confetti { position:fixed; inset:0; pointer-events:none; z-index:50; }
+  .status { font-size:13px; color:var(--muted); }
+</style>
+</head>
+<body>
+<canvas id="confetti"></canvas>
+<header>
+  <h1>🎲 GIWA <span>Dice</span></h1>
+  <div>
+    <div class="wallets" id="wallets"></div>
+    <div class="status" id="status">Not connected</div>
+  </div>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Pick a number and roll</h2>
+    <div class="muted">Each roll is one transaction on GIWA Sepolia testnet. Same number = WIN.</div>
+    <div class="dice" id="dice">?</div>
+    <div class="picks" id="picks"></div>
+    <button class="roll" id="rollBtn" disabled>Connect wallet to play</button>
+    <div class="result" id="result"></div>
+    <div class="muted" id="txline" style="text-align:center;margin-top:6px;"></div>
+  </section>
+
+  <section class="card">
+    <h2>Your stats</h2>
+    <div class="stats">
+      <div class="stat"><b id="sPlays">-</b><span>Plays</span></div>
+      <div class="stat"><b id="sWins">-</b><span>Wins</span></div>
+      <div class="stat"><b id="sToday">-</b><span>Today</span></div>
+      <div class="stat"><b id="sStreak">-</b><span>Day streak</span></div>
+      <div class="stat"><b id="sBest">-</b><span>Best streak</span></div>
+      <div class="stat"><b id="sRate">-</b><span>Win rate</span></div>
+    </div>
+    <h2 style="margin-top:20px;">Leaderboard</h2>
+    <div class="muted" id="global" style="margin-bottom:8px;"></div>
+    <table>
+      <thead><tr><th>#</th><th>Player</th><th>Wins</th><th>Plays</th></tr></thead>
+      <tbody id="board"><tr><td colspan="4" class="muted">Loading...</td></tr></tbody>
+    </table>
+  </section>
+</main>
+
+<footer>
+  GIWA Sepolia testnet only - no real money. Contract:
+  <a id="contractLink" target="_blank" rel="noopener"></a>
+</footer>
+
+<script>
+// ===== Config =====
+const CONTRACT_ADDRESS = "0x33f96c54cb80b10139b529fbaa86a660eda2ff20";
+const CHAIN_ID = 91342;
+const CHAIN_HEX = "0x164CE";
+const RPC_URL = "https://sepolia-rpc.giwa.io";
+const EXPLORER = "https://sepolia-explorer.giwa.io";
+const ABI = [
+  "function roll(uint8 guess) returns (uint8 result, bool win)",
+  "function players(address) view returns (uint32 plays, uint32 wins, uint32 streak, uint32 bestStreak, uint32 todayPlays, uint64 lastDay)",
+  "function totalPlays() view returns (uint256)",
+  "function totalWins() view returns (uint256)",
+  "function playerCount() view returns (uint256)",
+  "function getPlayers(uint256 start, uint256 count) view returns (address[] addrs, uint32[] plays, uint32[] wins)",
+  "event Rolled(address indexed player, uint8 guess, uint8 result, bool win, uint32 streak)"
+];
+const FACES = ["?", "⚀", "⚁", "⚂", "⚃", "⚄", "⚅"];
+
+// ===== State =====
+const readProvider = new ethers.JsonRpcProvider(RPC_URL, CHAIN_ID, { staticNetwork: true });
+const readContract = new ethers.Contract(CONTRACT_ADDRESS, ABI, readProvider);
+let wallet = null;      // EIP-1193 provider chosen by the user
+let account = null;
+let guess = null;
+const $ = id => document.getElementById(id);
+const short = a => a.slice(0, 6) + "..." + a.slice(-4);
+
+$("contractLink").textContent = short(CONTRACT_ADDRESS);
+$("contractLink").href = `${EXPLORER}/address/${CONTRACT_ADDRESS}`;
+
+// ===== Number picker =====
+for (let n = 1; n <= 6; n++) {
+  const b = document.createElement("button");
+  b.textContent = n;
+  b.onclick = () => {
+    guess = n;
+    [...$("picks").children].forEach(c => c.classList.toggle("sel", Number(c.textContent) === n));
+    updateRollBtn();
+  };
+  $("picks").appendChild(b);
+}
+function updateRollBtn() {
+  const btn = $("rollBtn");
+  if (!account) { btn.disabled = true; btn.textContent = "Connect wallet to play"; return; }
+  if (!guess) { btn.disabled = true; btn.textContent = "Pick a number 1-6"; return; }
+  btn.disabled = false; btn.textContent = `Roll for ${guess} 🎲`;
+}
+
+// ===== Wallet discovery (EIP-6963) =====
+const found = new Map();
+window.addEventListener("eip6963:announceProvider", e => {
+  const { info, provider } = e.detail;
+  if (found.has(info.uuid)) return;
+  found.set(info.uuid, provider);
+  const b = document.createElement("button");
+  b.className = "ghost";
+  b.innerHTML = info.icon ? `<img src="${info.icon}" width="16" height="16" style="vertical-align:middle;margin-right:6px">${info.name}` : info.name;
+  b.onclick = () => connect(provider, info.name);
+  $("wallets").appendChild(b);
+});
+window.dispatchEvent(new Event("eip6963:requestProvider"));
+setTimeout(() => {
+  if (found.size === 0 && window.ethereum) {
+    const b = document.createElement("button");
+    b.className = "ghost"; b.textContent = "Connect wallet";
+    b.onclick = () => connect(window.ethereum, "Wallet");
+    $("wallets").appendChild(b);
+  } else if (found.size === 0) {
+    $("status").textContent = "No wallet found. Install Rabby or MetaMask.";
+  }
+}, 600);
+
+async function ensureChain(p) {
+  const current = await p.request({ method: "eth_chainId" });
+  if (parseInt(current, 16) === CHAIN_ID) return;
+  try {
+    await p.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN_HEX }] });
+  } catch (err) {
+    const code = err.code ?? err?.data?.originalError?.code;
+    if (code === 4902 || /unrecognized|not added|unknown chain/i.test(err.message || "")) {
+      await p.request({ method: "wallet_addEthereumChain", params: [{
+        chainId: CHAIN_HEX, chainName: "GIWA Sepolia",
+        nativeCurrency: { name: "Sepolia Ether", symbol: "ETH", decimals: 18 },
+        rpcUrls: [RPC_URL], blockExplorerUrls: [EXPLORER]
+      }] });
+    } else { throw err; }
+  }
+}
+
+async function connect(p, name) {
+  try {
+    $("status").textContent = `Connecting ${name}...`;
+    const accs = await p.request({ method: "eth_requestAccounts" });
+    await ensureChain(p);
+    wallet = p; account = ethers.getAddress(accs[0]);
+    $("status").textContent = `${name}: ${short(account)} (GIWA Sepolia)`;
+    p.on?.("accountsChanged", a => { account = a[0] ? ethers.getAddress(a[0]) : null; refresh(); updateRollBtn(); });
+    p.on?.("chainChanged", () => window.location.reload());
+    updateRollBtn();
+    refresh();
+  } catch (e) {
+    $("status").textContent = "Connect failed: " + (e.shortMessage || e.message);
+  }
+}
+
+// ===== Play =====
+$("rollBtn").onclick = async () => {
+  if (!wallet || !account || !guess) return;
+  const btn = $("rollBtn"), dice = $("dice"), res = $("result");
+  btn.disabled = true; btn.textContent = "Confirm in your wallet...";
+  res.textContent = ""; res.className = "result"; $("txline").textContent = "";
+  try {
+    await ensureChain(wallet);
+    const signer = await new ethers.BrowserProvider(wallet).getSigner();
+    const game = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
+    const tx = await game.roll(guess);
+    btn.textContent = "Rolling on-chain...";
+    dice.classList.add("spin"); dice.textContent = "🎲";
+    $("txline").innerHTML = `Tx: <a target="_blank" rel="noopener" href="${EXPLORER}/tx/${tx.hash}">${short(tx.hash)}</a>`;
+    const receipt = await tx.wait();
+    dice.classList.remove("spin");
+    let ev = null;
+    for (const log of receipt.logs) {
+      try { const parsed = game.interface.parseLog(log); if (parsed && parsed.name === "Rolled") ev = parsed; } catch (_) {}
+    }
+    if (ev) {
+      const r = Number(ev.args.result);
+      dice.textContent = FACES[r];
+      if (ev.args.win) { res.textContent = `🎉 WIN! You picked ${guess}, dice rolled ${r}`; res.className = "result win"; confetti(); }
+      else { res.textContent = `Dice rolled ${r}. You picked ${guess}. Try again!`; res.className = "result lose"; }
+    } else {
+      dice.textContent = "✓"; res.textContent = "Roll confirmed.";
+    }
+    refresh();
+  } catch (e) {
+    dice.classList.remove("spin"); dice.textContent = "?";
+    res.textContent = (e.code === "ACTION_REJECTED" || e.code === 4001) ? "Transaction cancelled." : "Error: " + (e.shortMessage || e.message);
+    res.className = "result lose";
+  } finally {
+    updateRollBtn();
+  }
+};
+
+// ===== Read stats + leaderboard =====
+async function refresh() {
+  try {
+    const [tp, tw, pc] = await Promise.all([readContract.totalPlays(), readContract.totalWins(), readContract.playerCount()]);
+    $("global").textContent = `${pc} players • ${tp} rolls • ${tw} wins`;
+
+    if (account) {
+      const p = await readContract.players(account);
+      const today = BigInt(Math.floor(Date.now() / 86400000));
+      const plays = Number(p.plays), wins = Number(p.wins);
+      const isToday = p.lastDay === today, wasYesterday = p.lastDay + 1n === today;
+      $("sPlays").textContent = plays;
+      $("sWins").textContent = wins;
+      $("sToday").textContent = isToday ? Number(p.todayPlays) : 0;
+      $("sStreak").textContent = (isToday || wasYesterday) ? Number(p.streak) : 0;
+      $("sBest").textContent = Number(p.bestStreak);
+      $("sRate").textContent = plays ? Math.round((wins / plays) * 100) + "%" : "-";
+    }
+
+    const count = Number(pc), rows = [];
+    for (let start = 0; start < count && start < 1000; start += 200) {
+      const r = await readContract.getPlayers(start, 200);
+      r.addrs.forEach((a, i) => rows.push({ a, plays: Number(r.plays[i]), wins: Number(r.wins[i]) }));
+    }
+    rows.sort((x, y) => y.wins - x.wins || y.plays - x.plays);
+    const top = rows.slice(0, 10);
+    $("board").innerHTML = top.length ? top.map((r, i) => {
+      const me = account && r.a.toLowerCase() === account.toLowerCase();
+      return `<tr class="${me ? "me" : ""}"><td>${i + 1}</td><td><a target="_blank" rel="noopener" href="${EXPLORER}/address/${r.a}">${short(r.a)}</a>${me ? " (you)" : ""}</td><td>${r.wins}</td><td>${r.plays}</td></tr>`;
+    }).join("") : `<tr><td colspan="4" class="muted">No players yet. Be the first!</td></tr>`;
+  } catch (e) {
+    $("board").innerHTML = `<tr><td colspan="4" class="muted">Could not load: ${e.shortMessage || e.message}</td></tr>`;
+  }
+}
+refresh();
+setInterval(refresh, 30000);
+
+// ===== Confetti =====
+function confetti() {
+  const c = $("confetti"), ctx = c.getContext("2d");
+  c.width = innerWidth; c.height = innerHeight;
+  const colors = ["#4f7cff", "#2ecc71", "#ffd166", "#ff5c7a", "#c77dff"];
+  const parts = Array.from({ length: 160 }, () => ({
+    x: Math.random() * c.width, y: -20 - Math.random() * c.height * 0.5,
+    r: 4 + Math.random() * 5, vx: -2 + Math.random() * 4, vy: 2 + Math.random() * 4,
+    col: colors[Math.floor(Math.random() * colors.length)], rot: Math.random() * 6
+  }));
+  let frames = 0;
+  (function draw() {
+    ctx.clearRect(0, 0, c.width, c.height);
+    parts.forEach(p => { p.x += p.vx; p.y += p.vy; p.rot += 0.1; ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot); ctx.fillStyle = p.col; ctx.fillRect(-p.r, -p.r / 2, p.r * 2, p.r); ctx.restore(); });
+    if (++frames < 180) requestAnimationFrame(draw); else ctx.clearRect(0, 0, c.width, c.height);
+  })();
+}
+</script>
+</body>
+</html>
